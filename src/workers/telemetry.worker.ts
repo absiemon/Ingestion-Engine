@@ -1,113 +1,131 @@
-import { Injectable } from '@nestjs/common';
-import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bull';
+import { Processor, Process, OnQueueFailed } from '@nestjs/bull';
 import { Job } from 'bull';
-import { TelemetryService } from '../telemetry/telemetry.service';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 
-/**
- * Telemetry Worker - Processes telemetry data from the queue
- * Handles validation, transformation, and storage of meter and vehicle data
- */
 @Processor('telemetry')
 @Injectable()
-export class TelemetryWorker extends WorkerHost {
-  constructor(
-    private telemetryService: TelemetryService,
-    private prisma: PrismaService,
-  ) {
-    super();
-  }
+export class TelemetryWorker {
+  private readonly logger = new Logger(TelemetryWorker.name);
+
+  constructor(private readonly prisma: PrismaService) { }
 
   /**
-   * Main job processor
+   * Main telemetry processor
    */
-  async process(job: Job<any>) {
-    try {
-      const { type, meterId, vehicleId, data } = job.data;
+  @Process('telemetry-event')
+  async handleTelemetry(job: Job<any>) {
+    const event = job.data;
 
-      switch (type) {
-        case 'meter':
-          await this.processMeterTelemetry(meterId, data);
-          break;
-        case 'vehicle':
-          await this.processVehicleTelemetry(vehicleId, data);
-          break;
-        default:
-          throw new Error(`Unknown telemetry type: ${type}`);
+    try {
+      if (event.type === 'VEHICLE') {
+        await this.processVehicleTelemetry(event);
+      } else if (event.type === 'METER') {
+        await this.processMeterTelemetry(event);
+      } else {
+        throw new Error(`Unsupported telemetry type: ${event.type}`);
       }
 
-      return { success: true, processedAt: new Date() };
+      return { processedAt: new Date() };
     } catch (error) {
-      console.error(`Error processing telemetry job ${job.id}:`, error);
-      throw error;
+      this.logger.error(
+        `Telemetry job ${job.id} failed`,
+        error.stack,
+      );
+      throw error; // Bull will retry
     }
   }
 
   /**
-   * Process meter telemetry data
+   * VEHICLE telemetry processing
    */
-  private async processMeterTelemetry(
-    meterId: string,
-    data: Record<string, any>,
-  ) {
-    await this.telemetryService.recordTelemetry({
-      type: 'meter',
-      meterId,
-      data: {
-        voltage: data.voltage,
-        current: data.current,
-        power: data.power,
-        energy: data.energy,
-        quality: this.calculatePowerQuality(data),
-      },
+  private async processVehicleTelemetry(event: {
+    vehicleId: string;
+    soc: number;
+    batteryTemp: number;
+    kwhDeliveredDc: number;
+    timestamp: string;
+  }) {
+    const timestamp = new Date(event.timestamp);
+
+    await this.prisma.$transaction(async (tx) => {
+      // 1️⃣ Cold path — append-only history
+      await tx.vehicleTelemetryHistory.create({
+        data: {
+          vehicleId: event.vehicleId,
+          soc: event.soc,
+          batteryTemp: event.batteryTemp,
+          kwhDeliveredDc: event.kwhDeliveredDc,
+          timestamp,
+        },
+      });
+
+      // 2️⃣ Hot path — latest state
+      await tx.vehicleLiveStatus.upsert({
+        where: { vehicleId: event.vehicleId },
+        update: {
+          soc: event.soc,
+          batteryTemp: event.batteryTemp,
+          lastKwhDc: event.kwhDeliveredDc,
+          updatedAt: new Date(),
+        },
+        create: {
+          vehicleId: event.vehicleId,
+          soc: event.soc,
+          batteryTemp: event.batteryTemp,
+          lastKwhDc: event.kwhDeliveredDc,
+        },
+      });
     });
   }
 
   /**
-   * Process vehicle telemetry data
+   * METER telemetry processing
    */
-  private async processVehicleTelemetry(
-    vehicleId: string,
-    data: Record<string, any>,
-  ) {
-    await this.telemetryService.recordTelemetry({
-      type: 'vehicle',
-      vehicleId,
-      data: {
-        location: data.location,
-        speed: data.speed,
-        battery: data.battery,
-        status: data.status,
-      },
+  private async processMeterTelemetry(event: {
+    meterId: string;
+    voltage: number;
+    kwhConsumedAc: number;
+    timestamp: string;
+  }) {
+    const timestamp = new Date(event.timestamp);
+
+    await this.prisma.$transaction(async (tx) => {
+      // 1️⃣ Cold path — append-only history
+      await tx.meterTelemetryHistory.create({
+        data: {
+          meterId: event.meterId,
+          voltage: event.voltage,
+          kwhConsumedAc: event.kwhConsumedAc,
+          timestamp,
+        },
+      });
+
+      // 2️⃣ Hot path — latest state
+      await tx.meterLiveStatus.upsert({
+        where: { meterId: event.meterId },
+        update: {
+          voltage: event.voltage,
+          lastKwhAc: event.kwhConsumedAc,
+          updatedAt: new Date(),
+        },
+        create: {
+          meterId: event.meterId,
+          voltage: event.voltage,
+          lastKwhAc: event.kwhConsumedAc,
+        },
+      });
     });
   }
 
   /**
-   * Calculate power quality metrics
+   * Queue-level failure hook
    */
-  private calculatePowerQuality(data: any) {
-    // Simple example - calculate power factor
-    return {
-      powerFactor: (data.power / (data.voltage * data.current)) || 0,
-      harmonic: 0, // Would calculate actual harmonics
-    };
-  }
-
-  /**
-   * Worker event listeners
-   */
-  @OnWorkerEvent('completed')
-  onCompleted(job: Job) {
-    console.log(`✓ Telemetry job ${job.id} completed`);
-  }
-
-  @OnWorkerEvent('failed')
-  onFailed(job: Job, err: Error) {
-    console.error(`✗ Telemetry job ${job.id} failed:`, err.message);
-  }
-
-  @OnWorkerEvent('error')
-  onError(err: Error) {
-    console.error('Telemetry worker error:', err);
+  @OnQueueFailed()
+  onFailed(job: Job, error: Error) {
+    this.logger.error(
+      `Job ${job.id} permanently failed after retries`,
+      error.stack,
+    );
   }
 }

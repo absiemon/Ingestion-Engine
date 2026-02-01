@@ -3,52 +3,35 @@ import { AnalyticsService } from './analytics.service';
 
 @Controller('api/analytics')
 export class AnalyticsController {
-  constructor(private readonly analyticsService: AnalyticsService) {}
+  constructor(private readonly analyticsService: AnalyticsService) { }
 
-  /**
-   * Get meter analytics
-   */
+  // Historical analytics
   @Get('meters/:meterId')
-  async getMeterAnalytics(@Param('meterId') meterId: string) {
+  getMeterAnalytics(@Param('meterId') meterId: string) {
     return this.analyticsService.getMeterAnalytics(meterId);
   }
 
-  /**
-   * Get consumption trends
-   */
+  // Trends (daily aggregates)
   @Get('trends/:meterId')
-  async getTrends(
+  getTrends(
     @Param('meterId') meterId: string,
-    @Query('days') days: string = '30',
+    @Query('days') days = '30',
   ) {
     return this.analyticsService.getConsumptionTrends(
       meterId,
-      parseInt(days, 10),
+      Number(days),
     );
   }
 
-  /**
-   * Compare multiple meters
-   */
+  // Comparison
   @Get('compare')
-  async compareMeters(@Query('meters') meterIds: string) {
-    const ids = meterIds.split(',');
-    return this.analyticsService.compareMeters(ids);
+  compareMeters(@Query('meters') meters: string) {
+    return this.analyticsService.compareMeters(meters.split(','));
   }
 
-  /**
-   * Detect anomalies
-   */
-  @Get('anomalies/:meterId')
-  async detectAnomalies(@Param('meterId') meterId: string) {
-    return this.analyticsService.detectAnomalies(meterId);
-  }
-
-  /**
-   * Get dashboard summary
-   */
+  // Dashboard = LIVE + AGG
   @Get('dashboard/summary')
-  async getDashboardSummary() {
+  getDashboardSummary() {
     return this.analyticsService.getDashboardSummary();
   }
 }
