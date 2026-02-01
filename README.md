@@ -15,6 +15,11 @@ The system is built using:
 
 ---
 
+<img width="1805" height="631" alt="image" src="https://github.com/user-attachments/assets/6259ae4d-9f15-4229-9644-28971dc40188" />
+
+
+
+
 ## High-Level Architecture
 
              ┌────────────┐
