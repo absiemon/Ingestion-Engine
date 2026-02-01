@@ -14,7 +14,19 @@ import { QueueService } from './queue.service';
         },
         removeOnComplete: true,
       },
-    }),
+    },
+      {
+        name: 'analytics',
+        defaultJobOptions: {
+          attempts: 3,
+          backoff: {
+            type: 'exponential',
+            delay: 2000,
+          },
+          removeOnComplete: true,
+        },
+      },
+    ),
   ],
   providers: [QueueService],
   exports: [QueueService],

@@ -8,34 +8,15 @@ export class PrismaService
   constructor() {
     super({
       log: [
-        { emit: 'event', level: 'error' },
-        { emit: 'event', level: 'warn' },
+        { emit: 'stdout', level: 'error' },
+        { emit: 'stdout', level: 'warn' },
+        { emit: 'event', level: 'query' }, // enable query events
       ],
-      datasources: {
-        db: {
-          url: process.env.DATABASE_URL,
-        },
-      },
     });
   }
 
   async onModuleInit() {
     await this.$connect();
-
-    // Optional: monitor slow queries
-    this.$on('query' as any, (e) => {
-      if (e.duration > 500) {
-        console.warn(
-          `🐢 Slow query (${e.duration}ms): ${e.query}`,
-        );
-      }
-    });
-  }
-
-  async enableShutdownHooks(app: any) {
-    this.$on('beforeExit', async () => {
-      await app.close();
-    });
   }
 
   async onModuleDestroy() {

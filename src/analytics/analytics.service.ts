@@ -1,22 +1,24 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
-import { QueueService } from 'src/queue/queue.service';
+import { QueueService } from '../queue/queue.service';
 
 @Injectable()
 export class AnalyticsService {
   constructor(
-    private prisma: PrismaService,
-    private readonly queueService: QueueService
+    private readonly prisma: PrismaService,
+    private readonly queueService: QueueService,
   ) { }
 
+  // ================= METER ANALYTICS =================
+
   /**
-   * Get analytics for a specific meter
+   * Get hourly analytics for a meter (last 7 days)
    */
   async getMeterAnalytics(meterId: string) {
-    const data = await this.prisma.meterHourlyAgg.findMany({
+    const data = await this.prisma.meterEnergyHourly.findMany({
       where: { meterId },
       orderBy: { hour: 'desc' },
-      take: 168, // last 7 days
+      take: 168, // 24 * 7
     });
 
     return {
@@ -26,15 +28,15 @@ export class AnalyticsService {
     };
   }
 
-
   /**
-   * Get energy consumption trends
+   * Get daily consumption trends
    */
   async getConsumptionTrends(meterId: string, days: number) {
     const start = new Date();
     start.setDate(start.getDate() - days);
+    start.setHours(0, 0, 0, 0);
 
-    const data = await this.prisma.meterDailyAgg.findMany({
+    const data = await this.prisma.meterEnergyDaily.findMany({
       where: {
         meterId,
         day: { gte: start },
@@ -45,55 +47,56 @@ export class AnalyticsService {
     return {
       meterId,
       range: `${days} days`,
-      totalEnergy: data.reduce((s, d) => s + d.totalKwh, 0),
+      totalEnergy: data.reduce((sum, d) => sum + d.totalAc, 0),
       data,
     };
   }
 
-
   /**
-   * Calculate comparative analytics between meters
+   * Compare meters by total daily energy
    */
   async compareMeters(meterIds: string[]) {
-    const stats = await this.prisma.meterDailyAgg.groupBy({
+    const stats = await this.prisma.meterEnergyDaily.groupBy({
       by: ['meterId'],
       where: { meterId: { in: meterIds } },
-      _sum: { totalKwh: true },
-      _avg: { avgPower: true },
+      _sum: { totalAc: true },
+      _avg: { avgVoltage: true },
     });
 
     return {
-      comparison: stats.map(s => ({
+      comparison: stats.map((s) => ({
         meterId: s.meterId,
-        totalEnergy: s._sum.totalKwh ?? 0,
-        avgPower: s._avg.avgPower ?? 0,
+        totalEnergy: s._sum.totalAc ?? 0,
+        avgVoltage: s._avg.avgVoltage ?? 0,
       })),
     };
   }
 
-
   /**
-   * Get dashboard summary
+   * Dashboard summary
    */
   async getDashboardSummary() {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
     const [meters, vehicles, energyToday] = await Promise.all([
       this.prisma.meter.count(),
       this.prisma.vehicle.count(),
-      this.prisma.meterDailyAgg.aggregate({
-        where: {
-          day: new Date(new Date().setHours(0, 0, 0, 0)),
-        },
-        _sum: { totalKwh: true },
+      this.prisma.meterEnergyDaily.aggregate({
+        where: { day: today },
+        _sum: { totalAc: true },
       }),
     ]);
 
     return {
       meters,
       vehicles,
-      energyToday: energyToday._sum.totalKwh ?? 0,
+      energyToday: energyToday._sum.totalAc ?? 0,
       generatedAt: new Date(),
     };
   }
+
+  // ================= AGGREGATION QUEUE =================
 
   /**
    * Enqueue hourly aggregation job
@@ -109,17 +112,18 @@ export class AnalyticsService {
     const hourEnd = new Date(hourStart);
     hourEnd.setHours(hourEnd.getHours() + 1);
 
-    return this.queueService.addAnalyticsJob(
-      {
-        scope: params.scope,
-        entityId: params.entityId,
-        bucket: 'hourly',
+    if (params.scope === 'meter') {
+      return this.queueService.enqueueMeterHourlyAggregation({
+        meterId: params.entityId,
         windowStart: hourStart.toISOString(),
         windowEnd: hourEnd.toISOString(),
-      },
-      {
-        jobId: `${params.scope}:${params.entityId}:${hourStart.toISOString()}`,
-      },
-    );
+      });
+    }
+
+    return this.queueService.enqueueVehicleHourlyAggregation({
+      vehicleId: params.entityId,
+      windowStart: hourStart.toISOString(),
+      windowEnd: hourEnd.toISOString(),
+    });
   }
 }

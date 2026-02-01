@@ -1,148 +1,117 @@
-import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bull';
+import { Processor, Process } from '@nestjs/bull';
 import { Injectable } from '@nestjs/common';
-import { Job } from 'bull';
+import type { Job } from 'bull';
 import { PrismaService } from '../../database/prisma.service';
 
-export interface AggregationJobPayload {
-    scope: 'vehicle' | 'meter';
-    entityId: string;
-    bucket: 'hourly';
+@Processor('analytics')
+@Injectable()
+export class AggregationWorker {
+  constructor(private readonly prisma: PrismaService) {}
+
+  // ================= VEHICLE =================
+
+  @Process('vehicle-hourly-aggregation')
+  async vehicleHourly(job: Job<{
+    vehicleId: string;
     windowStart: string;
     windowEnd: string;
-}
+  }>) {
+    const { vehicleId, windowStart, windowEnd } = job.data;
 
-@Processor('analytics-aggregation')
-@Injectable()
-export class AggregationWorker extends WorkerHost {
-    constructor(private readonly prisma: PrismaService) {
-        super();
-    }
+    const from = new Date(windowStart);
+    const to = new Date(windowEnd);
 
-    async process(job: Job<AggregationJobPayload>) {
-        const { scope, entityId, bucket, windowStart, windowEnd } = job.data;
+    const rows = await this.prisma.vehicleTelemetryHistory.findMany({
+      where: {
+        vehicleId,
+        timestamp: {
+          gte: from,
+          lt: to,
+        },
+      },
+    });
 
-        if (bucket !== 'hourly') {
-            throw new Error(`Unsupported bucket: ${bucket}`);
-        }
+    if (rows.length === 0) return;
 
-        if (scope === 'vehicle') {
-            await this.aggregateVehicleHourly(
-                entityId,
-                new Date(windowStart),
-                new Date(windowEnd),
-            );
-        }
+    const totalDc = rows.reduce(
+      (sum, r) => sum + r.kwhDeliveredDc,
+      0,
+    );
 
-        if (scope === 'meter') {
-            await this.aggregateMeterHourly(
-                entityId,
-                new Date(windowStart),
-                new Date(windowEnd),
-            );
-        }
+    const avgBatteryTemp =
+      rows.reduce((sum, r) => sum + r.batteryTemp, 0) / rows.length;
 
-        return { success: true };
-    }
+    await this.prisma.vehicleEnergyHourly.upsert({
+      where: {
+        vehicleId_hour: {
+          vehicleId,
+          hour: from,
+        },
+      },
+      create: {
+        vehicleId,
+        hour: from,
+        totalDc,
+        totalAc: 0,
+        avgBatteryTemp,
+      },
+      update: {
+        totalDc,
+        avgBatteryTemp,
+      },
+    });
+  }
 
-    // ================= VEHICLE =================
+  // ================= METER =================
 
-    private async aggregateVehicleHourly(
-        vehicleId: string,
-        from: Date,
-        to: Date,
-    ) {
-        const rows = await this.prisma.vehicleTelemetryHistory.findMany({
-            where: {
-                vehicleId,
-                timestamp: {
-                    gte: from,
-                    lt: to,
-                },
-            },
-        });
+  @Process('meter-hourly-aggregation')
+  async meterHourly(job: Job<{
+    meterId: string;
+    windowStart: string;
+    windowEnd: string;
+  }>) {
+    const { meterId, windowStart, windowEnd } = job.data;
 
-        if (rows.length === 0) return;
+    const from = new Date(windowStart);
+    const to = new Date(windowEnd);
 
-        const totalDc = rows.reduce(
-            (sum, r) => sum + r.kwhDeliveredDc,
-            0,
-        );
+    const rows = await this.prisma.meterTelemetryHistory.findMany({
+      where: {
+        meterId,
+        timestamp: {
+          gte: from,
+          lt: to,
+        },
+      },
+    });
 
-        const avgBatteryTemp =
-            rows.reduce((sum, r) => sum + r.batteryTemp, 0) / rows.length;
+    if (rows.length === 0) return;
 
-        await this.prisma.vehicleEnergyHourly.upsert({
-            where: {
-                vehicleId_hour: {
-                    vehicleId,
-                    hour: from,
-                },
-            },
-            create: {
-                vehicleId,
-                hour: from,
-                totalDc,
-                totalAc: 0,
-                avgBatteryTemp,
-            },
-            update: {
-                totalDc,
-                avgBatteryTemp,
-            },
-        });
-    }
+    const totalAc = rows.reduce(
+      (sum, r) => sum + r.kwhConsumedAc,
+      0,
+    );
 
-    // ================= METER =================
+    const avgVoltage =
+      rows.reduce((sum, r) => sum + r.voltage, 0) / rows.length;
 
-    private async aggregateMeterHourly(
-        meterId: string,
-        from: Date,
-        to: Date,
-    ) {
-        const rows = await this.prisma.meterTelemetryHistory.findMany({
-            where: {
-                meterId,
-                timestamp: {
-                    gte: from,
-                    lt: to,
-                },
-            },
-        });
-
-        if (rows.length === 0) return;
-
-        const totalAc = rows.reduce(
-            (sum, r) => sum + r.kwhConsumedAc,
-            0,
-        );
-
-        await this.prisma.meterEnergyHourly.upsert({
-            where: {
-                meterId_hour: {
-                    meterId,
-                    hour: from,
-                },
-            },
-            create: {
-                meterId,
-                hour: from,
-                totalAc,
-            },
-            update: {
-                totalAc,
-            },
-        });
-    }
-
-    // ================= EVENTS =================
-
-    @OnWorkerEvent('completed')
-    onCompleted(job: Job) {
-        console.log(`✓ Aggregation job ${job.id} completed`);
-    }
-
-    @OnWorkerEvent('failed')
-    onFailed(job: Job, err: Error) {
-        console.error(`✗ Aggregation job ${job.id} failed`, err.message);
-    }
+    await this.prisma.meterEnergyHourly.upsert({
+      where: {
+        meterId_hour: {
+          meterId,
+          hour: from,
+        },
+      },
+      create: {
+        meterId,
+        hour: from,
+        totalAc,
+        avgVoltage,
+      },
+      update: {
+        totalAc,
+        avgVoltage,
+      },
+    });
+  }
 }

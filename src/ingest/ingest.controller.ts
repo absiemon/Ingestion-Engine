@@ -6,8 +6,8 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { IngestService } from './ingest.service';
-import { VehicleTelemetryDto } from './dto/vehicle-telemetry.dto';
-import { MeterTelemetryDto } from './dto/meter-telemetry.dto';
+import { VehicleTelemetryDto } from './dto/vehicle.dto';
+import { MeterTelemetryDto } from './dto/meter.dto';
 
 @Controller('v1/ingest')
 export class IngestController {

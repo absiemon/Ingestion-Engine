@@ -1,7 +1,7 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { QueueService } from '../queue/queue.service';
-import { VehicleTelemetryDto } from './dto/vehicle-telemetry.dto';
-import { MeterTelemetryDto } from './dto/meter-telemetry.dto';
+import { VehicleTelemetryDto } from './dto/vehicle.dto';
+import { MeterTelemetryDto } from './dto/meter.dto';
 
 @Injectable()
 export class IngestService {

@@ -1,98 +1,314 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Telemetry Analytics Platform – System Architecture & Design
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+## Overview
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+This project is a **high-throughput telemetry ingestion and analytics system** designed for **vehicles and meters**.  
+It supports **real-time status**, **historical telemetry**, and **time-bucketed analytics** (hourly/daily) while remaining **scalable, fault-tolerant, and cost-efficient**.
 
-## Description
+The system is built using:
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+- **NestJS** – application framework
+- **PostgreSQL** – primary data store
+- **Prisma ORM** – schema & data access
+- **Redis + Bull** – async queues
+- **Worker-based aggregation pipeline**
 
-## Project setup
+---
 
-```bash
-$ npm install
-```
+## High-Level Architecture
 
-## Compile and run the project
+             ┌────────────┐
+             │   Devices  │
+             │(Meter / EV)│
+             └─────┬──────┘
+                   │
+                   ▼
+           ┌─────────────────┐
+           │  Ingest API      │
+           │  (HTTP / MQTT)   │
+           └─────┬───────────┘
+                 │
+      ┌──────────┴──────────┐
+      │                     │
+      ▼                     ▼
+┌──────────────────┐ ┌─────────────────────┐
+│ Telemetry Queue  │ │ Analytics Queue     │
+│ (raw ingestion)  │ │ (aggregation jobs)  │
+└─────┬────────────┘ └──────────┬──────────┘
+      │                         │
+      ▼                         ▼
+┌──────────────┐ ┌─────────────────────┐
+│ Telemetry    │ │ Aggregation Worker  │
+│ Worker       │ │    (hourly / daily) │
+└─────┬────────┘ └──────────┬──────────┘
+      │                     │
+      ▼                     ▼
+┌──────────────────┐ ┌────────────────────┐
+│ HOT TABLES       │ │ COLD / AGG TABLES  │
+│ (Live + History) │ │ (Hourly / Daily)   │
+└──────────────────┘ └────────────────────┘
 
-```bash
-# development
-$ npm run start
 
-# watch mode
-$ npm run start:dev
 
-# production mode
-$ npm run start:prod
-```
+---
 
-## Run tests
+## Data Modeling Strategy
 
-```bash
-# unit tests
-$ npm run test
+### 1. Hot Tables (Write-Optimized)
 
-# e2e tests
-$ npm run test:e2e
+These tables receive **high-frequency writes**.
 
-# test coverage
-$ npm run test:cov
-```
+#### Live Status (latest state)
+- `VehicleLiveStatus`
+- `MeterLiveStatus`
 
-## Deployment
+Used for:
+- Dashboards
+- Current SOC / Voltage
+- Real-time monitoring
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+> Only **1 row per entity**, constantly overwritten.
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+#### Telemetry History (raw events)
+- `VehicleTelemetryHistory`
+- `MeterTelemetryHistory`
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
+Used for:
+- Backfills
+- Reprocessing
+- Accurate historical calculations
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+Characteristics:
+- Append-only
+- High write throughput
+- Indexed by `(entityId, timestamp)`
 
-## Resources
+---
 
-Check out a few resources that may come in handy when working with NestJS:
+### 2. Cold Tables (Read-Optimized)
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+These tables store **aggregated analytics**.
 
-## Support
+#### Hourly Aggregates
+- `VehicleEnergyHourly`
+- `MeterEnergyHourly`
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+#### Daily Aggregates
+- `MeterEnergyDaily`
 
-## Stay in touch
+Used for:
+- Analytics APIs
+- Trends
+- Dashboards
+- Comparisons
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+Characteristics:
+- Very small row count
+- Fast queries
+- Predictable access patterns
 
-## License
+---
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+## Why Hot + Cold Tables?
+
+| Problem | Solution |
+|------|--------|
+| Millions of telemetry events | Append-only hot tables |
+| Slow analytics queries | Pre-aggregated cold tables |
+| Expensive GROUP BY | Async aggregation workers |
+| Real-time dashboards | Live status tables |
+
+This pattern is widely used in:
+- IoT platforms
+- FinTech ledgers
+- Observability systems
+- Time-series analytics
+
+---
+
+## Queue-Based Design
+
+### Why Queues?
+
+We intentionally **do not process analytics synchronously** because:
+
+- Telemetry traffic is bursty
+- Aggregations are expensive
+- APIs must remain fast
+- Failures must be retryable
+
+Queues give us:
+- Backpressure handling
+- Retry & delay
+- Horizontal scaling
+- Isolation of concerns
+
+---
+
+## Queue Types
+
+### 1. Telemetry Queue
+
+**Purpose**
+- Accept raw telemetry events
+- Decouple ingestion from storage
+
+**Produces**
+- Telemetry Worker jobs
+
+---
+
+### 2. Analytics Aggregation Queue
+
+**Purpose**
+- Perform time-bucket aggregation
+- Convert raw telemetry → analytics rows
+
+**Produces**
+- Hourly & daily rollups
+
+---
+
+## Workers
+
+### Telemetry Worker
+
+**Responsibilities**
+- Validate incoming telemetry
+- Write to:
+  - Live tables
+  - Telemetry history tables
+- Enqueue aggregation jobs
+
+**Why separate worker?**
+- Keeps API fast
+- Allows horizontal scaling
+- Safe retries on failure
+
+---
+
+### Aggregation Worker
+
+**Responsibilities**
+- Consume aggregation jobs
+- Aggregate telemetry in time windows
+- Upsert hourly / daily tables
+
+**Key Properties**
+- Idempotent (safe re-runs)
+- Time-bucketed
+- Deterministic outputs
+
+---
+
+## Aggregation Flow
+
+Telemetry Event
+│
+▼
+Telemetry Worker
+│
+├─ Write to History
+│
+├─ Update Live Status
+│
+▼
+Enqueue Aggregation Job
+│
+▼
+Aggregation Worker
+│
+├─ Read telemetry in time window
+├─ Compute totals / averages
+└─ Upsert cold tables
+
+
+
+---
+
+## Why Upserts?
+
+- Avoid duplicate aggregates
+- Safe retries
+- Idempotency
+- Allows late-arriving telemetry
+
+---
+
+## Analytics API Design
+
+Analytics APIs **never touch raw telemetry tables**.
+
+They query only:
+- `MeterEnergyHourly`
+- `MeterEnergyDaily`
+- `VehicleEnergyHourly`
+
+Benefits:
+- Predictable performance
+- No heavy GROUP BY
+- Easy caching
+- API stability
+
+---
+
+## Scalability Considerations
+
+### Horizontal Scaling
+- Multiple workers per queue
+- Stateless services
+- Redis-backed coordination
+
+### Backfill Support
+- Historical telemetry preserved
+- Aggregation jobs can be replayed
+- Safe for corrections
+
+### Failure Handling
+- Job retries
+- Idempotent aggregation
+- No partial writes
+
+---
+
+## Why This Design?
+
+This architecture was chosen because it:
+
+✅ Handles **high ingestion rates**  
+✅ Keeps **APIs fast**  
+✅ Scales horizontally  
+✅ Supports **reprocessing & backfills**  
+✅ Separates concerns cleanly  
+✅ Matches real-world IoT & analytics systems  
+
+This is a **production-grade, industry-proven pattern**.
+
+---
+
+## Future Enhancements
+
+- Weekly / monthly aggregates
+- Partitioned telemetry tables
+- Data retention policies
+- Materialized views (optional)
+- Streaming consumers (Kafka / Pulsar)
+- Multi-tenant sharding
+
+---
+
+## Summary
+
+This system intentionally separates:
+
+- **Ingestion vs Analytics**
+- **Hot vs Cold data**
+- **Real-time vs Historical**
+- **Write-heavy vs Read-heavy paths**
+
+Resulting in a platform that is:
+**fast, scalable, resilient, and easy to evolve**.
+
+---
+
+🧠 _Design inspired by large-scale telemetry systems used in EV platforms, smart grids, and observability stacks._

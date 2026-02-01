@@ -1,14 +1,18 @@
 import { Processor, Process, OnQueueFailed } from '@nestjs/bull';
-import { Job } from 'bull';
+import type { Job } from 'bull';
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
+import { QueueService } from '../queue/queue.service';
 
 @Processor('telemetry')
 @Injectable()
 export class TelemetryWorker {
   private readonly logger = new Logger(TelemetryWorker.name);
 
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly queueService: QueueService,
+  ) { }
 
   /**
    * Main telemetry processor
@@ -32,13 +36,12 @@ export class TelemetryWorker {
         `Telemetry job ${job.id} failed`,
         error.stack,
       );
-      throw error; // Bull will retry
+      throw error; // Bull retry
     }
   }
 
-  /**
-   * VEHICLE telemetry processing
-   */
+  // ================= VEHICLE =================
+
   private async processVehicleTelemetry(event: {
     vehicleId: string;
     soc: number;
@@ -47,6 +50,7 @@ export class TelemetryWorker {
     timestamp: string;
   }) {
     const timestamp = new Date(event.timestamp);
+    const { start, end } = this.getHourWindow(timestamp);
 
     await this.prisma.$transaction(async (tx) => {
       // 1️⃣ Cold path — append-only history
@@ -60,7 +64,7 @@ export class TelemetryWorker {
         },
       });
 
-      // 2️⃣ Hot path — latest state
+      // 2️⃣ Hot path — latest snapshot
       await tx.vehicleLiveStatus.upsert({
         where: { vehicleId: event.vehicleId },
         update: {
@@ -77,11 +81,17 @@ export class TelemetryWorker {
         },
       });
     });
+
+    // 3️⃣ Enqueue vehicle hourly aggregation
+    await this.queueService.enqueueVehicleHourlyAggregation({
+      vehicleId: event.vehicleId,
+      windowStart: start.toISOString(),
+      windowEnd: end.toISOString(),
+    });
   }
 
-  /**
-   * METER telemetry processing
-   */
+  // ================= METER =================
+
   private async processMeterTelemetry(event: {
     meterId: string;
     voltage: number;
@@ -89,6 +99,7 @@ export class TelemetryWorker {
     timestamp: string;
   }) {
     const timestamp = new Date(event.timestamp);
+    const { start, end } = this.getHourWindow(timestamp);
 
     await this.prisma.$transaction(async (tx) => {
       // 1️⃣ Cold path — append-only history
@@ -101,7 +112,7 @@ export class TelemetryWorker {
         },
       });
 
-      // 2️⃣ Hot path — latest state
+      // 2️⃣ Hot path — latest snapshot
       await tx.meterLiveStatus.upsert({
         where: { meterId: event.meterId },
         update: {
@@ -116,15 +127,33 @@ export class TelemetryWorker {
         },
       });
     });
+
+    // 3️⃣ Enqueue meter hourly aggregation
+    await this.queueService.enqueueMeterHourlyAggregation({
+      meterId: event.meterId,
+      windowStart: start.toISOString(),
+      windowEnd: end.toISOString(),
+    });
   }
 
-  /**
-   * Queue-level failure hook
-   */
+  // ================= HELPERS =================
+
+  private getHourWindow(timestamp: Date) {
+    const start = new Date(timestamp);
+    start.setMinutes(0, 0, 0);
+
+    const end = new Date(start);
+    end.setHours(end.getHours() + 1);
+
+    return { start, end };
+  }
+
+  // ================= EVENTS =================
+
   @OnQueueFailed()
   onFailed(job: Job, error: Error) {
     this.logger.error(
-      `Job ${job.id} permanently failed after retries`,
+      `Job ${job.id} permanently failed`,
       error.stack,
     );
   }

@@ -1,3 +1,12 @@
+generator client {
+  provider   = "prisma-client-js"
+  engineType = "binary"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
 model Vehicle {
   id        String   @id @default(cuid())
   vehicleId String   @unique
@@ -91,4 +100,35 @@ model VehicleEnergyHourly {
 
   @@unique([vehicleId, hour])
   @@index([vehicleId, hour])
+}
+
+
+model MeterEnergyHourly {
+  id        BigInt   @id @default(autoincrement())
+
+  meterId   String
+  hour      DateTime
+
+  totalAc   Float
+  avgVoltage Float?
+
+  createdAt DateTime @default(now())
+
+  @@unique([meterId, hour])
+  @@index([meterId, hour])
+}
+
+model MeterEnergyDaily {
+  id        BigInt   @id @default(autoincrement())
+
+  meterId   String
+  day       DateTime
+
+  totalAc   Float
+  avgVoltage Float?
+
+  createdAt DateTime @default(now())
+
+  @@unique([meterId, day])
+  @@index([meterId, day])
 }
